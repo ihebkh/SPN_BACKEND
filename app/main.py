@@ -4,6 +4,12 @@ from sqlalchemy import text
 from app import database, schemas
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+import math
+
+from datetime import datetime
 
 app = FastAPI()
 
@@ -13,15 +19,15 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 
 origins = [
-    "http://localhost:4000",  # Origine de votre application Next.js
+    "http://localhost:4000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],  # Permet toutes les origines
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Permet tous les types de méthodes HTTP
+    allow_headers=["*"],  # Permet tous les types d'en-têtes
 )
 
 
@@ -510,7 +516,7 @@ def get_revenue_by_offer_and_date(
     if params.get("adjustement_type"):
         filters += "AND doff.adjustement_type = :adjustement_type "
 
-    query = query + filters + " GROUP BY o.offer_code, d.date , d.date LIMIT 10"
+    query = query + filters + " GROUP BY o.offer_code, d.date , d.date LIMIT 5"
 
     results = db.execute(text(query), params).fetchall()
     
@@ -1073,26 +1079,93 @@ def get_total_price(
 
 
 @app.get("/filters/car-types", response_model=List[str])
-async def get_car_types(
-    db: Session = Depends(get_db)
-    ):
+async def get_car_types(db: Session = Depends(get_db)):
     query = 'select slug from dimcars'
-    results = db.execute(text(query)).fetchall()
-    return [result["slug"].strip() for result in results]
+    results = db.execute(text(query)).fetchall()  # Results are tuples
+    return [result[0].strip() for result in results]  # Access by index
+
 
 @app.get("/filters/dates", response_model=List[str])
-async def get_dates(
-    db: Session = Depends(get_db)
-    ):
+async def get_dates(db: Session = Depends(get_db)):
     query = 'select date from dimdates'
-    results = db.execute(text(query)).fetchall()
-    return [result["date"].strftime('%Y-%m-%d') for result in results]
+    results = db.execute(text(query)).fetchall()  # Returns tuples
+    return [result[0].strftime('%Y-%m-%d') for result in results]  # Access by index
 
 
 @app.get("/filters/dests", response_model=List[str])
-async def get_dests(
-    db: Session = Depends(get_db)
-    ):
+async def get_dests(db: Session = Depends(get_db)):
     query = 'select dest_code from dimdestinations'
-    results = db.execute(text(query)).fetchall()
-    return [result["dest_code"].strip() for result in results]
+    results = db.execute(text(query)).fetchall()  # Returns tuples
+    return [result[0].strip() for result in results]  # Access by index
+
+
+@app.get("/predict_total_price/", response_model=schemas.TotalPricePrediction)
+def predict_total_price(future_date: str, db: Session = Depends(get_db)):
+    query = """
+    SELECT dimdates.date, factrequests.total_price 
+    FROM factrequests
+    JOIN dimdates ON factrequests.date_fk = dimdates.date_pk
+    """
+    result = db.execute(text(query))
+    df = pd.DataFrame(result.fetchall(), columns=['date', 'total_price'])
+
+    df['date'] = pd.to_datetime(df['date'])
+    df['date_numeric'] = (df['date'] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+
+    X = df[['date_numeric']]
+    y = df['total_price']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+
+    try:
+        future_date_obj = datetime.strptime(future_date, '%Y-%m-%d')
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    future_date_numeric = (future_date_obj - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+
+    predicted_price = model.predict([[future_date_numeric]])
+    return schemas.TotalPricePrediction(predicted_total_price=round(predicted_price[0], 2))
+
+@app.get("/optimize_fleet/", response_model=schemas.FleetOptimization)
+def optimize_fleet(future_date: str, db: Session = Depends(get_db)):
+    query = """
+    SELECT dimdates.date, factrequests.total_price, factrequests.passenger_count_client 
+    FROM factrequests
+    JOIN dimdates ON factrequests.date_fk = dimdates.date_pk
+    """
+    result = db.execute(text(query))
+    df = pd.DataFrame(result.fetchall(), columns=['date', 'total_price', 'passenger_count_client'])
+
+    df['date'] = pd.to_datetime(df['date'])
+    df['date_numeric'] = (df['date'] - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+
+    X = df[['date_numeric']]
+    y = df['passenger_count_client']
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+
+    try:
+        future_date_obj = datetime.strptime(future_date, '%Y-%m-%d')
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+    future_date_numeric = (future_date_obj - pd.Timestamp("1970-01-01")) // pd.Timedelta('1D')
+
+    predicted_passenger_count = math.ceil(model.predict([[future_date_numeric]])[0])
+
+    vehicle_capacity = 4
+    recommended_fleet_size = math.ceil(predicted_passenger_count / vehicle_capacity)
+    recommended_fleet_size_adjusted = math.ceil(recommended_fleet_size / 0.85)
+
+    return schemas.FleetOptimization(
+        predicted_passenger_count=predicted_passenger_count,
+        recommended_fleet_size=recommended_fleet_size,
+        adjusted_fleet_size=recommended_fleet_size_adjusted
+    )

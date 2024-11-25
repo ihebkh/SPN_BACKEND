@@ -277,3 +277,11 @@ class ImageKPI(BaseModel):
 
 class TotalPriceResponse(BaseModel):
     total_price: float
+
+class TotalPricePrediction(BaseModel):
+    predicted_total_price: float
+
+class FleetOptimization(BaseModel):
+    predicted_passenger_count: int
+    recommended_fleet_size: int
+    adjusted_fleet_size: int
